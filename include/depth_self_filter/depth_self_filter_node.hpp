@@ -41,10 +41,12 @@ private:
     const CamInfoMsg::ConstSharedPtr & info);
 
   // Build render items by looking up each link pose at `stamp` in the optical
-  // frame. Returns false if too many TF lookups fail.
+  // frame. When `frustum_cull_` is set, links whose posed bounding box is wholly
+  // outside `cam`'s frustum are skipped (visibility pre-selection). Returns false
+  // if too many TF lookups fail.
   bool build_items(
-    const std::string & optical_frame, const rclcpp::Time & stamp,
-    std::vector<RenderItem> & items);
+    const CameraModel & cam, const std::string & optical_frame,
+    const rclcpp::Time & stamp, std::vector<RenderItem> & items);
 
   // Parameters
   bool use_collision_{true};
@@ -54,6 +56,7 @@ private:
   double tf_timeout_s_{0.05};
   double time_offset_s_{0.0};
   float near_{0.02f}, far_{10.0f};
+  bool frustum_cull_{true};     // skip links whose AABB is outside the view frustum
   std::vector<std::string> include_links_, exclude_links_;
 
   // State

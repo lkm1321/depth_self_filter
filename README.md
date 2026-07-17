@@ -39,6 +39,7 @@ Selection is automatic and logged at startup (`render backend: egl|cpu`).
 Key params (see [config/params.yaml](config/params.yaml)): `use_collision_meshes`,
 `depth_margin_m`, `robot_dilation_px`, `mask_dilation_px`,
 `include_links`/`exclude_links`, `tf_timeout_s`, `time_offset_s`, `near_m`/`far_m`,
+`frustum_cull` (skip links whose bounding box is off-screen; default `true`),
 intrinsics `override_fx/fy/cx/cy`, debug `focal_scale`/`publish_debug`.
 
 ### Absorbing calibration error at the silhouette

@@ -13,6 +13,9 @@ depth_self_filter:
     mask_dilation_px: 4            # final binary grow of the self-mask
     near_m: 0.02
     far_m: 10.0
+    frustum_cull: true              # skip rasterizing links whose bounding box is
+                                    # wholly outside the camera frustum (behind the
+                                    # camera, past far, or off-frame)
 
     # Time sync / TF
     tf_timeout_s: 0.05

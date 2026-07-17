@@ -207,7 +207,11 @@ std::vector<LinkGeometry> load_link_meshes(
     for (const auto & c : cols) add_one(c->geometry, c->origin);
     for (const auto & c : vis) add_one(c->geometry, c->origin);
 
-    if (!lg.mesh.indices.empty()) out.push_back(std::move(lg));
+    if (!lg.mesh.indices.empty()) {
+      // Precompute the link-frame AABB once so per-frame frustum culling is cheap.
+      compute_bounds(lg.mesh);
+      out.push_back(std::move(lg));
+    }
   }
   return out;
 }

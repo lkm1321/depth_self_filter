@@ -49,6 +49,7 @@ add_library(${PROJECT_NAME}_component SHARED
   src/depth_self_filter_node.cpp
   src/urdf_meshes.cpp
   src/cpu_renderer.cpp
+  src/visibility.cpp
   ${DSF_EGL_SOURCES})
 
 target_include_directories(${PROJECT_NAME}_component PUBLIC
@@ -74,6 +75,14 @@ ament_target_dependencies(depth_self_filter_main rclcpp)
 add_executable(render_probe src/render_probe.cpp)
 target_link_libraries(render_probe ${PROJECT_NAME}_component Eigen3::Eigen)
 
+# Frustum-culling ablation benchmark (dev tool; off by default, not installed).
+option(DSF_BUILD_BENCH "Build the frustum culling benchmark" OFF)
+if(DSF_BUILD_BENCH)
+  add_executable(frustum_bench bench/frustum_bench.cpp)
+  target_link_libraries(frustum_bench ${PROJECT_NAME}_component Eigen3::Eigen)
+  ament_target_dependencies(frustum_bench urdf)
+endif()
+
 install(TARGETS ${PROJECT_NAME}_component
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -90,6 +99,11 @@ if(BUILD_TESTING)
     src/cpu_renderer.cpp)
   target_include_directories(test_cpu_renderer PRIVATE include)
   target_link_libraries(test_cpu_renderer Eigen3::Eigen)
+
+  ament_add_gtest(test_visibility test/test_visibility.cpp
+    src/visibility.cpp)
+  target_include_directories(test_visibility PRIVATE include)
+  target_link_libraries(test_visibility Eigen3::Eigen)
 endif()
 
 ament_export_include_directories(include)

@@ -109,6 +109,7 @@ DepthSelfFilterNode::DepthSelfFilterNode(const rclcpp::NodeOptions & options)
   time_offset_s_ = declare_parameter("time_offset_s", 0.0);
   near_ = static_cast<float>(declare_parameter("near_m", 0.02));
   far_ = static_cast<float>(declare_parameter("far_m", 10.0));
+  frustum_cull_ = declare_parameter("frustum_cull", true);
   include_links_ = declare_parameter("include_links", std::vector<std::string>{});
   exclude_links_ = declare_parameter("exclude_links", std::vector<std::string>{});
   std::string urdf_param = declare_parameter("robot_description", std::string{});
@@ -184,24 +185,40 @@ void DepthSelfFilterNode::load_meshes(const std::string & urdf_xml)
 }
 
 bool DepthSelfFilterNode::build_items(
-  const std::string & optical_frame, const rclcpp::Time & stamp,
-  std::vector<RenderItem> & items)
+  const CameraModel & cam, const std::string & optical_frame,
+  const rclcpp::Time & stamp, std::vector<RenderItem> & items)
 {
   items.clear();
   const auto lookup_stamp = stamp + rclcpp::Duration::from_seconds(time_offset_s_);
   const auto timeout = tf2::durationFromSec(tf_timeout_s_);
-  size_t failures = 0;
+  size_t failures = 0, culled = 0;
   for (const auto & link : links_) {
+    Eigen::Isometry3f T_cam_link;
     try {
       const auto tf = tf_buffer_->lookupTransform(
         optical_frame, link.link_name, lookup_stamp, timeout);
-      RenderItem it;
-      it.mesh = &link.mesh;
-      it.T_cam_link = tf2::transformToEigen(tf).cast<float>();
-      items.push_back(it);
+      T_cam_link = tf2::transformToEigen(tf).cast<float>();
     } catch (const tf2::TransformException &) {
       ++failures;
+      continue;
     }
+    // Visibility pre-selection: drop links whose posed bounding box can't fall
+    // anywhere in the camera frustum, so the backend never transforms/rasterizes
+    // (or, on the GPU path, uploads + issues a draw for) an off-screen link.
+    // A culled link is still a successful TF lookup, so it does NOT count as a
+    // failure against the "most links placed" quorum below.
+    if (frustum_cull_ && !mesh_in_frustum(cam, link.mesh, T_cam_link)) {
+      ++culled;
+      continue;
+    }
+    RenderItem it;
+    it.mesh = &link.mesh;
+    it.T_cam_link = T_cam_link;
+    items.push_back(it);
+  }
+  if (culled > 0) {
+    RCLCPP_DEBUG(get_logger(), "frustum cull: %zu/%zu links off-screen, rendering %zu",
+      culled, links_.size(), items.size());
   }
   // If we couldn't place most links, the render would be wrong — skip the frame.
   return !links_.empty() && failures <= links_.size() / 2;
@@ -217,31 +234,33 @@ void DepthSelfFilterNode::on_frame(
     return;
   }
 
+  // Build the camera model up front so it can drive both frustum culling (in
+  // build_items) and the render below.
+  CameraModel cam;
+  cam.width = static_cast<int>(depth->width);
+  cam.height = static_cast<int>(depth->height);
+  // Intrinsics: use camera_info by default; allow per-axis override for cameras
+  // whose recorded camera_info is wrong/placeholder (>0 overrides). focal_scale
+  // additionally multiplies fx,fy (debug convenience).
+  const double fs = this->get_parameter("focal_scale").as_double();
+  const double ofx = this->get_parameter("override_fx").as_double();
+  const double ofy = this->get_parameter("override_fy").as_double();
+  const double ocx = this->get_parameter("override_cx").as_double();
+  const double ocy = this->get_parameter("override_cy").as_double();
+  cam.fx = static_cast<float>((ofx > 0 ? ofx : info->k[0]) * fs);
+  cam.fy = static_cast<float>((ofy > 0 ? ofy : info->k[4]) * fs);
+  cam.cx = static_cast<float>(ocx > 0 ? ocx : info->k[2]);
+  cam.cy = static_cast<float>(ocy > 0 ? ocy : info->k[5]);
+  cam.near = near_;
+  cam.far = far_;
+
   // Pass-through if we have no geometry or no TF yet.
   std::vector<RenderItem> items;
   const bool have_robot =
     !links_.empty() &&
-    build_items(depth->header.frame_id, rclcpp::Time(depth->header.stamp), items);
+    build_items(cam, depth->header.frame_id, rclcpp::Time(depth->header.stamp), items);
 
   if (have_robot) {
-    CameraModel cam;
-    cam.width = static_cast<int>(depth->width);
-    cam.height = static_cast<int>(depth->height);
-    // Intrinsics: use camera_info by default; allow per-axis override for cameras
-    // whose recorded camera_info is wrong/placeholder (>0 overrides). focal_scale
-    // additionally multiplies fx,fy (debug convenience).
-    const double fs = this->get_parameter("focal_scale").as_double();
-    const double ofx = this->get_parameter("override_fx").as_double();
-    const double ofy = this->get_parameter("override_fy").as_double();
-    const double ocx = this->get_parameter("override_cx").as_double();
-    const double ocy = this->get_parameter("override_cy").as_double();
-    cam.fx = static_cast<float>((ofx > 0 ? ofx : info->k[0]) * fs);
-    cam.fy = static_cast<float>((ofy > 0 ? ofy : info->k[4]) * fs);
-    cam.cx = static_cast<float>(ocx > 0 ? ocx : info->k[2]);
-    cam.cy = static_cast<float>(ocy > 0 ? ocy : info->k[5]);
-    cam.near = near_;
-    cam.far = far_;
-
     if (renderer_->render(cam, items, robot_depth_)) {
       // Grow the rendered robot's near surface to absorb silhouette / calibration
       // error (keeps foreground objects; see dilate_robot_depth).

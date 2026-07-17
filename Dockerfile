@@ -53,9 +53,12 @@ ENV NVIDIA_DRIVER_CAPABILITIES=graphics,compute,utility
 
 WORKDIR /ws
 COPY . /ws/src/depth_self_filter
+# Set --build-arg DSF_BUILD_BENCH=ON to compile the frustum-culling benchmark
+# (bench/frustum_bench) into /ws/build; off by default so normal images stay lean.
+ARG DSF_BUILD_BENCH=OFF
 RUN . /opt/ros/humble/setup.sh && \
     colcon build --packages-select depth_self_filter \
-      --cmake-args -DCMAKE_BUILD_TYPE=Release
+      --cmake-args -DCMAKE_BUILD_TYPE=Release -DDSF_BUILD_BENCH=${DSF_BUILD_BENCH}
 
 # Source the overlay for interactive shells.
 RUN echo 'source /opt/ros/humble/setup.bash && source /ws/install/setup.bash' \
