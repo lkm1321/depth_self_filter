@@ -1,5 +1,6 @@
 #include "depth_self_filter/depth_self_filter_node.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -64,6 +65,37 @@ void dilate(std::vector<uint8_t> & m, int w, int h, int radius)
   }
 }
 
+// Grayscale min-dilation of the rendered robot depth: grow the robot's nearest
+// surface outward by `radius` px, filling neighbours (and invalid pixels) with
+// the closest robot depth in range. This absorbs lateral silhouette / extrinsic
+// error WITHOUT swallowing foreground objects — unlike a binary mask dilation —
+// because the mask test still requires `measured >= robot - margin`, so an object
+// closer than the (grown) robot surface still survives. Invalid pixels are 0.
+// min is separable, so we do a horizontal then a vertical pass.
+void dilate_robot_depth(std::vector<float> & d, int w, int h, int radius)
+{
+  if (radius <= 0) return;
+  constexpr float kInf = std::numeric_limits<float>::infinity();
+  const auto val = [](float x) { return x > 0.f ? x : kInf; };
+  std::vector<float> tmp(d.size(), kInf);
+  for (int y = 0; y < h; ++y) {           // horizontal min
+    for (int x = 0; x < w; ++x) {
+      float best = kInf;
+      const int lo = std::max(0, x - radius), hi = std::min(w - 1, x + radius);
+      for (int xx = lo; xx <= hi; ++xx) best = std::min(best, val(d[static_cast<size_t>(y) * w + xx]));
+      tmp[static_cast<size_t>(y) * w + x] = best;
+    }
+  }
+  for (int y = 0; y < h; ++y) {           // vertical min
+    for (int x = 0; x < w; ++x) {
+      float best = kInf;
+      const int lo = std::max(0, y - radius), hi = std::min(h - 1, y + radius);
+      for (int yy = lo; yy <= hi; ++yy) best = std::min(best, tmp[static_cast<size_t>(yy) * w + x]);
+      d[static_cast<size_t>(y) * w + x] = std::isfinite(best) ? best : 0.f;
+    }
+  }
+}
+
 }  // namespace
 
 DepthSelfFilterNode::DepthSelfFilterNode(const rclcpp::NodeOptions & options)
@@ -71,6 +103,7 @@ DepthSelfFilterNode::DepthSelfFilterNode(const rclcpp::NodeOptions & options)
 {
   use_collision_ = declare_parameter("use_collision_meshes", true);
   depth_margin_m_ = declare_parameter("depth_margin_m", 0.02);
+  robot_dilation_px_ = declare_parameter("robot_dilation_px", 2);
   mask_dilation_px_ = declare_parameter("mask_dilation_px", 4);
   tf_timeout_s_ = declare_parameter("tf_timeout_s", 0.05);
   time_offset_s_ = declare_parameter("time_offset_s", 0.0);
@@ -210,6 +243,10 @@ void DepthSelfFilterNode::on_frame(
     cam.far = far_;
 
     if (renderer_->render(cam, items, robot_depth_)) {
+      // Grow the rendered robot's near surface to absorb silhouette / calibration
+      // error (keeps foreground objects; see dilate_robot_depth).
+      dilate_robot_depth(robot_depth_, cam.width, cam.height, robot_dilation_px_);
+
       const size_t n = meas.size();
       std::vector<uint8_t> mask(n, 0);
       const float margin = static_cast<float>(depth_margin_m_);

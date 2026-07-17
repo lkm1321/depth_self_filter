@@ -49,6 +49,7 @@ private:
   // Parameters
   bool use_collision_{true};
   double depth_margin_m_{0.02};
+  int robot_dilation_px_{2};   // grow rendered robot depth (absorbs silhouette error)
   int mask_dilation_px_{4};
   double tf_timeout_s_{0.05};
   double time_offset_s_{0.0};
