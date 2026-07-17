@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>depth_self_filter</name>
+  <version>0.1.0</version>
+  <description>
+    Robot self-filtering for RGB-D depth images: render the robot's URDF meshes
+    into the camera view (EGL/OpenGL, CPU fallback) and subtract the robot's own
+    pixels from the depth image. ROS2 Humble.
+  </description>
+  <maintainer email="lkm1321@gmail.com">brian</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclcpp_components</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_eigen</depend>
+  <depend>image_transport</depend>
+  <depend>message_filters</depend>
+  <depend>cv_bridge</depend>
+  <depend>urdf</depend>
+  <depend>eigen</depend>
+  <depend>assimp</depend>
+  <depend>resource_retriever</depend>
+
+  <!-- EGL / OpenGL are system libs found via CMake (see CMakeLists.txt) -->
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

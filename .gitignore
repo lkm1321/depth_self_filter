@@ -1,0 +1,45 @@
+# --- colcon / ament build artifacts ---
+build/
+install/
+log/
+# colcon symlink-install can leave these at the workspace root
+/COLCON_IGNORE
+/AMENT_IGNORE
+
+# --- C / C++ / CMake ---
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+*.o
+*.a
+*.so
+*.so.*
+*.d
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# --- editors / OS ---
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# --- test / runtime outputs ---
+# comparison PNGs and rendered debug frames from the verifier
+out/
+test/**/out/
+
+# --- large data / bags (keep meshes & configs) ---
+*.bag
+*.db3
+*.mcap
+*.tar.gz

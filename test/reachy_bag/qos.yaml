@@ -1,0 +1,7 @@
+# Replay /tf_static as transient_local so the node's TransformListener (which
+# subscribes transient_local) receives the latched static transforms.
+/tf_static:
+  history: keep_last
+  depth: 100
+  reliability: reliable
+  durability: transient_local

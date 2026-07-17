@@ -1,0 +1,29 @@
+depth_self_filter:
+  ros__parameters:
+    # Geometry source
+    use_collision_meshes: true      # collision meshes are lighter/coarser (preferred)
+    include_links: []               # empty = all links with geometry
+    exclude_links: []               # e.g. ["camera_link", "camera_optical_frame"]
+
+    # Filtering
+    depth_margin_m: 0.02            # keep pixels this far IN FRONT of the robot surface
+    mask_dilation_px: 4            # grow self-mask to absorb calibration/edge error
+    near_m: 0.02
+    far_m: 10.0
+
+    # Time sync / TF
+    tf_timeout_s: 0.05
+    time_offset_s: 0.0             # add to image stamp for TF lookup (latency comp)
+
+    # robot_description can be passed here or via the /robot_description topic
+    robot_description: ""
+
+    # Intrinsics override (>0 replaces camera_info). Use when the camera's
+    # recorded camera_info is wrong/placeholder. Example: Luxonis ToF 33D FFC
+    # (640x480, 82.3 deg DFoV) -> nominal fx=fy=457, cx=320, cy=240.
+    override_fx: 0.0
+    override_fy: 0.0
+    override_cx: 0.0
+    override_cy: 0.0
+    focal_scale: 1.0        # debug: multiply camera_info fx,fy
+    publish_debug: false    # publish rendered robot_depth for inspection
