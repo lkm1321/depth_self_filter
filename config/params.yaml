@@ -2,8 +2,12 @@ depth_self_filter:
   ros__parameters:
     # Geometry source
     use_collision_meshes: true      # collision meshes are lighter/coarser (preferred)
-    include_links: []               # empty = all links with geometry
-    exclude_links: []               # e.g. ["camera_link", "camera_optical_frame"]
+    # include/exclude default to empty (= all links with geometry). Leave them
+    # UNSET rather than writing `[]`: an empty list in a params file breaks
+    # ComposableNode loading (launch_ros can't type an empty sequence). Set them
+    # only when non-empty, e.g.:
+    # include_links: ["torso", "l_upper_arm_link"]
+    # exclude_links: ["camera_link", "camera_optical_frame"]
 
     # Filtering
     depth_margin_m: 0.02            # keep pixels this far IN FRONT of the robot surface

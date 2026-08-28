@@ -27,6 +27,35 @@ Each depth frame:
 
 Selection is automatic and logged at startup (`render backend: egl|cpu`).
 
+## Running composed (zero-copy)
+
+The node is a registered `rclcpp` component. Running it standalone
+(`depth_self_filter.launch.py`) copies each depth frame across processes from the
+camera driver. To avoid that, load the driver and the filter into **one**
+`component_container_mt` with intra-process comms so raw `sensor_msgs/Image`
+frames are passed by pointer:
+
+```bash
+# filter only (attach to an existing camera container / bag):
+ros2 launch depth_self_filter depth_self_filter_composable.launch.py
+# filter + Luxonis depthai_ros_driver in one process (driver→filter zero-copy):
+ros2 launch depth_self_filter depth_self_filter_composable.launch.py load_camera:=true
+```
+
+IPC applies because the filter subscribes to the **raw** image topic with
+volatile best-effort `SensorDataQoS` and move-publishes its `unique_ptr` output.
+The latched `robot_description` subscription (transient_local) is explicitly
+opted out of IPC. The one unavoidable per-frame copy is the `16UC1` mm → `32FC1`
+m conversion (encoding change), not a transport copy. Note: this shares the host
+process; it does **not** run on the camera's VPU (see below).
+
+### On-camera (Luxonis) feasibility
+The filter is kinematics-driven (needs per-frame TF/`joint_states` in the camera
+frame), so it is **not** an OpenVINO blob. On **RVC2 / Myriad X** (OAK-D) there is
+no GPU/rasterizer — it cannot run there. On **RVC4 / QRB5165** (OAK-4, Adreno GPU,
+on-device Ubuntu/ROS 2) it is feasible after porting the EGL path from desktop
+GL 3.3 to OpenGL ES and streaming robot state to the device.
+
 ## Topics
 | Dir | Topic (default) | Type | Notes |
 |-----|-----------------|------|-------|

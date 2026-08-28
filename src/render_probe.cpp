@@ -38,6 +38,25 @@ Mesh make_corner_quad()
   return m;
 }
 
+// A quad TILTED about y, so depth varies across it and its plane is neither
+// fronto-parallel nor axis-aligned — a fronto-parallel test surface would pass
+// even with a badly wrong normal.
+Mesh make_tilted_quad()
+{
+  const float tilt = 0.5f;   // rad about +y
+  const float c = std::cos(tilt), s = std::sin(tilt);
+  const float z0 = 1.6f, hs = 0.35f;
+  Mesh m;
+  for (int i = 0; i < 4; ++i) {
+    const float lx = (i == 0 || i == 3) ? -hs : hs;
+    const float ly = (i < 2) ? -hs : hs;
+    // rotate (lx, ly, 0) about y, then push to z0
+    m.vertices.push_back({c * lx, ly, -s * lx + z0});
+  }
+  m.indices = {0, 1, 2, 0, 2, 3};
+  return m;
+}
+
 // Mean (row, col) of valid pixels.
 bool centroid(const std::vector<float> & d, int w, int h, float & row, float & col)
 {
@@ -97,6 +116,73 @@ int main(int argc, char ** argv)
     std::fprintf(stderr, "FAIL: EGL disagrees with CPU reference (flip/offset)\n");
     return 7;
   }
+  // --- Plane output: exact geometry instead of finite-differenced depth --------
+  //
+  // The estimator in calibration.cpp uses render_planes() to intersect each pixel
+  // ray with the true surface plane. On GPU that comes out of a second colour
+  // attachment and a dFdx/dFdy face normal, which is a different derivation from
+  // the CPU rasterizer's per-triangle plane — so it needs checking against the
+  // reference on real hardware, not assuming.
+  Mesh tilted = make_tilted_quad();
+  std::vector<RenderItem> titems{{&tilted, Eigen::Isometry3f::Identity()}};
+
+  std::vector<float> dtc, ptc, dte, pte;
+  const bool cpu_planes = cpu->render_planes(cam, titems, dtc, ptc);
+  const bool egl_planes = egl->render_planes(cam, titems, dte, pte);
+  std::printf("plane support: cpu=%s egl=%s\n",
+    cpu_planes ? "yes" : "no", egl_planes ? "yes" : "no");
+  if (!cpu_planes) { std::fprintf(stderr, "FAIL: CPU must supply planes\n"); return 8; }
+  if (!egl_planes) {
+    std::printf("egl   no plane output — estimator falls back to finite differences\n");
+    std::printf("OK\n");
+    return 0;
+  }
+
+  // Compare only where BOTH backends drew geometry and neither pixel sits on a
+  // silhouette (rasterization differs by a pixel at edges, and the GPU's 2x2
+  // derivative quads are meaningless there).
+  double worst_ang = 0.0, worst_d = 0.0, worst_z = 0.0;
+  long compared = 0;
+  const int w = cam.width, h = cam.height;
+  for (int y = 1; y < h - 1; ++y) {
+    for (int x = 1; x < w - 1; ++x) {
+      const size_t i = static_cast<size_t>(y) * w + x;
+      if (dtc[i] <= 0.f || dte[i] <= 0.f) continue;
+      bool interior = true;
+      for (int dy = -1; dy <= 1 && interior; ++dy)
+        for (int dx = -1; dx <= 1 && interior; ++dx) {
+          const size_t j = static_cast<size_t>(y + dy) * w + (x + dx);
+          interior = dtc[j] > 0.f && dte[j] > 0.f;
+        }
+      if (!interior) continue;
+
+      const Eigen::Vector3f nc(ptc[i * 4], ptc[i * 4 + 1], ptc[i * 4 + 2]);
+      const Eigen::Vector3f ne(pte[i * 4], pte[i * 4 + 1], pte[i * 4 + 2]);
+      if (nc.squaredNorm() < 0.5f || ne.squaredNorm() < 0.5f) continue;
+      const double cosang = std::min(1.f, std::max(-1.f, nc.dot(ne)));
+      worst_ang = std::max(worst_ang, std::acos(cosang) * 180.0 / M_PI);
+      worst_d = std::max<double>(worst_d, std::fabs(ptc[i * 4 + 3] - pte[i * 4 + 3]));
+
+      // What the estimator actually consumes: the ray-plane intersection depth.
+      const Eigen::Vector3f v((x + 0.5f - cam.cx) / cam.fx,
+                              (y + 0.5f - cam.cy) / cam.fy, 1.f);
+      const float zc = ptc[i * 4 + 3] / nc.dot(v);
+      const float ze = pte[i * 4 + 3] / ne.dot(v);
+      worst_z = std::max<double>(worst_z, std::fabs(zc - ze));
+      ++compared;
+    }
+  }
+  std::printf("plane egl-vs-cpu over %ld px: max angle=%.4f deg, max |dd|=%.3f mm, "
+              "max |dz|=%.3f mm\n", compared, worst_ang, worst_d * 1e3, worst_z * 1e3);
+  if (compared < 1000) {
+    std::fprintf(stderr, "FAIL: too few comparable pixels (%ld)\n", compared); return 9;
+  }
+  // Tolerances: the two derivations differ only by float rounding on a planar
+  // surface. Anything larger means the GPU normal is genuinely wrong.
+  if (worst_ang > 0.5 || worst_z > 1e-3) {
+    std::fprintf(stderr, "FAIL: EGL planes disagree with CPU reference\n"); return 10;
+  }
+
   std::printf("OK\n");
   return 0;
 }

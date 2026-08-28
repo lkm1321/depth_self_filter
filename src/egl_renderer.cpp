@@ -62,6 +62,7 @@ PFNGLGETUNIFORMLOCATIONPROC glGetUniformLocation_;
 PFNGLUNIFORMMATRIX4FVPROC glUniformMatrix4fv_;
 PFNGLENABLEVERTEXATTRIBARRAYPROC glEnableVertexAttribArray_;
 PFNGLVERTEXATTRIBPOINTERPROC glVertexAttribPointer_;
+PFNGLDRAWBUFFERSPROC glDrawBuffers_;
 
 bool load_gl()
 {
@@ -91,8 +92,43 @@ bool load_gl()
   load(glUniformMatrix4fv_, "glUniformMatrix4fv");
   load(glEnableVertexAttribArray_, "glEnableVertexAttribArray");
   load(glVertexAttribPointer_, "glVertexAttribPointer");
+  load(glDrawBuffers_, "glDrawBuffers");
   return glGenFramebuffers_ && glCreateProgram_ && glUniformMatrix4fv_;
 }
+
+const char * kVertPlane =
+  "#version 330 core\n"
+  "layout(location=0) in vec3 pos;\n"
+  "uniform mat4 mvp;\n"
+  "out vec3 vpos;\n"
+  // Positions arrive already in the camera optical frame, so the varying IS the
+  // eye-space position and needs no extra matrix.
+  "void main(){ vpos = pos; gl_Position = mvp * vec4(pos,1.0); }\n";
+// Emit the exact plane of the triangle covering this fragment.
+//
+// vpos is interpolated perspective-correctly, so for a planar triangle its
+// screen-space derivatives are two independent tangent vectors OF THAT PLANE and
+// their cross product is the exact face normal — no per-triangle attribute, no
+// geometry shader, no vertex duplication. d follows as n . vpos because the
+// interpolated position lies on the plane.
+//
+// Caveat: derivatives are evaluated per 2x2 quad, so a fragment straddling two
+// triangles of different orientation (an interior crease, e.g. where two box
+// faces meet) can mix them for a ~1 px band. Silhouettes are already excluded by
+// the consumer's depth-edge gate; creases are not, which is why render_probe
+// measures the EGL-vs-CPU plane disagreement rather than assuming it is zero.
+const char * kFragPlane =
+  "#version 330 core\n"
+  "in vec3 vpos;\n"
+  "layout(location=1) out vec4 plane;\n"
+  "void main(){\n"
+  "  vec3 g = cross(dFdx(vpos), dFdy(vpos));\n"
+  "  float L = length(g);\n"
+  "  if (L < 1e-20) { plane = vec4(0.0); return; }\n"
+  "  vec3 n = g / L;\n"
+  "  if (dot(n, vpos) > 0.0) n = -n;\n"   // face the camera (+z forward)
+  "  plane = vec4(n, dot(n, vpos));\n"
+  "}\n";
 
 const char * kVert =
   "#version 330 core\n"
@@ -182,10 +218,46 @@ public:
     const Eigen::Matrix4f P = projection(cam);
     for (const auto & item : items) {
       if (!item.mesh || item.mesh->indices.empty()) continue;
-      draw(P, cam, item);
+      draw(P, cam, item, mvp_loc_);
     }
 
     read_depth(cam, depth_out);
+    glBindFramebuffer_(GL_FRAMEBUFFER, 0);
+    return true;
+  }
+
+  // Same rasterization, additionally reading back the exact plane per pixel.
+  bool render_planes(
+    const CameraModel & cam,
+    const std::vector<RenderItem> & items,
+    std::vector<float> & depth_out,
+    std::vector<float> & plane_out) override
+  {
+    if (!prog_plane_ || !glDrawBuffers_) return false;   // caller falls back
+    if (!ensure_fbo(cam.width, cam.height)) return false;
+    glBindFramebuffer_(GL_FRAMEBUFFER, fbo_);
+    glViewport(0, 0, cam.width, cam.height);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+
+    const GLenum bufs[2] = {GL_NONE, GL_COLOR_ATTACHMENT1};
+    glDrawBuffers_(2, bufs);
+    glClearColor(0, 0, 0, 0);
+    glClearDepth(1.0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glUseProgram_(prog_plane_);
+
+    const Eigen::Matrix4f P = projection(cam);
+    for (const auto & item : items) {
+      if (!item.mesh || item.mesh->indices.empty()) continue;
+      draw(P, cam, item, mvp_plane_loc_);
+    }
+
+    read_depth(cam, depth_out);
+    read_planes(cam, depth_out, plane_out);
+
+    const GLenum back[2] = {GL_COLOR_ATTACHMENT0, GL_NONE};
+    glDrawBuffers_(2, back);
     glBindFramebuffer_(GL_FRAMEBUFFER, 0);
     return true;
   }
@@ -241,7 +313,9 @@ private:
     return P;
   }
 
-  void draw(const Eigen::Matrix4f & P, const CameraModel &, const RenderItem & item)
+  void draw(
+    const Eigen::Matrix4f & P, const CameraModel &, const RenderItem & item,
+    GLint mvp_loc)
   {
     const Mesh & m = *item.mesh;
     // Positions transformed to camera optical frame on CPU (small meshes); the
@@ -262,7 +336,7 @@ private:
       m.indices.data(), GL_DYNAMIC_DRAW);
     glEnableVertexAttribArray_(0);
     glVertexAttribPointer_(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
-    glUniformMatrix4fv_(mvp_loc_, 1, GL_FALSE, P.data());  // Eigen is col-major
+    glUniformMatrix4fv_(mvp_loc, 1, GL_FALSE, P.data());  // Eigen is col-major
     glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(m.indices.size()),
       GL_UNSIGNED_INT, nullptr);
   }
@@ -287,12 +361,30 @@ private:
     }
   }
 
+  // Read attachment 1 and zero it wherever no geometry was drawn, so the plane
+  // buffer's validity exactly matches the depth buffer's.
+  void read_planes(
+    const CameraModel & cam, const std::vector<float> & depth,
+    std::vector<float> & out)
+  {
+    const size_t n = static_cast<size_t>(cam.width) * cam.height;
+    out.assign(n * 4, 0.f);
+    glReadBuffer(GL_COLOR_ATTACHMENT1);
+    glReadPixels(0, 0, cam.width, cam.height, GL_RGBA, GL_FLOAT, out.data());
+    for (size_t i = 0; i < n; ++i) {
+      if (depth[i] <= 0.f) {
+        for (int k = 0; k < 4; ++k) out[i * 4 + k] = 0.f;
+      }
+    }
+  }
+
   bool ensure_fbo(int w, int h)
   {
     if (w == fbo_w_ && h == fbo_h_ && fbo_) return true;
     if (!fbo_) {
       glGenFramebuffers_(1, &fbo_);
       glGenRenderbuffers_(1, &color_rb_);
+      glGenRenderbuffers_(1, &plane_rb_);
       glGenRenderbuffers_(1, &depth_rb_);
     }
     glBindFramebuffer_(GL_FRAMEBUFFER, fbo_);
@@ -300,6 +392,12 @@ private:
     glRenderbufferStorage_(GL_RENDERBUFFER, GL_RGBA8, w, h);
     glFramebufferRenderbuffer_(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
       GL_RENDERBUFFER, color_rb_);
+    // Attachment 1 carries the per-pixel plane (nx, ny, nz, d) at full float
+    // precision — 8-bit would be useless for a metric offset.
+    glBindRenderbuffer_(GL_RENDERBUFFER, plane_rb_);
+    glRenderbufferStorage_(GL_RENDERBUFFER, GL_RGBA32F, w, h);
+    glFramebufferRenderbuffer_(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+      GL_RENDERBUFFER, plane_rb_);
     glBindRenderbuffer_(GL_RENDERBUFFER, depth_rb_);
     glRenderbufferStorage_(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, w, h);
     glFramebufferRenderbuffer_(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
@@ -312,18 +410,28 @@ private:
 
   bool build_program()
   {
-    GLuint vs = compile(GL_VERTEX_SHADER, kVert);
-    GLuint fs = compile(GL_FRAGMENT_SHADER, kFrag);
-    if (!vs || !fs) return false;
-    prog_ = glCreateProgram_();
-    glAttachShader_(prog_, vs);
-    glAttachShader_(prog_, fs);
-    glLinkProgram_(prog_);
-    GLint ok = 0;
-    glGetProgramiv_(prog_, GL_LINK_STATUS, &ok);
-    if (!ok) return false;
+    prog_ = link(kVert, kFrag);
+    if (!prog_) return false;
     mvp_loc_ = glGetUniformLocation_(prog_, "mvp");
+    // Plane output is optional: if it fails to build we simply report no planes
+    // and callers fall back, rather than losing the renderer entirely.
+    prog_plane_ = link(kVertPlane, kFragPlane);
+    if (prog_plane_) mvp_plane_loc_ = glGetUniformLocation_(prog_plane_, "mvp");
     return true;
+  }
+
+  GLuint link(const char * vsrc, const char * fsrc)
+  {
+    GLuint vs = compile(GL_VERTEX_SHADER, vsrc);
+    GLuint fs = compile(GL_FRAGMENT_SHADER, fsrc);
+    if (!vs || !fs) return 0;
+    GLuint p = glCreateProgram_();
+    glAttachShader_(p, vs);
+    glAttachShader_(p, fs);
+    glLinkProgram_(p);
+    GLint ok = 0;
+    glGetProgramiv_(p, GL_LINK_STATUS, &ok);
+    return ok ? p : 0;
   }
 
   GLuint compile(GLenum type, const char * src)
@@ -344,9 +452,9 @@ private:
 
   EGLDisplay dpy_ = EGL_NO_DISPLAY;
   EGLContext ctx_ = EGL_NO_CONTEXT;
-  GLuint prog_ = 0, vao_ = 0, vbo_ = 0, ebo_ = 0;
-  GLuint fbo_ = 0, color_rb_ = 0, depth_rb_ = 0;
-  GLint mvp_loc_ = -1;
+  GLuint prog_ = 0, prog_plane_ = 0, vao_ = 0, vbo_ = 0, ebo_ = 0;
+  GLuint fbo_ = 0, color_rb_ = 0, plane_rb_ = 0, depth_rb_ = 0;
+  GLint mvp_loc_ = -1, mvp_plane_loc_ = -1;
   int fbo_w_ = -1, fbo_h_ = -1;
 };
 

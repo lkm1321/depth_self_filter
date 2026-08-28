@@ -63,6 +63,30 @@ public:
     const std::vector<RenderItem> & items,
     std::vector<float> & depth_out) = 0;
 
+  /// Optional: render depth AND the plane of the winning surface per pixel, in
+  /// the camera optical frame, packed as 4 floats (nx, ny, nz, d) with `n` unit,
+  /// facing the camera, and `n . X = d` for points X on that surface. Pixels with
+  /// no geometry get all zeros.
+  ///
+  /// This exists so a consumer can use the analytic geometry instead of
+  /// finite-differencing the depth image to recover normals the rasterizer
+  /// already had exactly — and so it can intersect the ray with the true plane
+  /// rather than trusting the interpolated z (which this rasterizer computes
+  /// linearly in screen space, an approximation for a plane).
+  ///
+  /// Returns false if the backend cannot supply planes; callers MUST fall back.
+  /// The EGL backend currently does not (it would need a second colour
+  /// attachment), so it keeps this default.
+  virtual bool render_planes(
+    const CameraModel & cam,
+    const std::vector<RenderItem> & items,
+    std::vector<float> & depth_out,
+    std::vector<float> & plane_out)
+  {
+    (void)cam; (void)items; (void)depth_out; (void)plane_out;
+    return false;
+  }
+
   /// Human-readable backend name for logging ("egl", "cpu").
   virtual const char * name() const = 0;
 };

@@ -103,3 +103,69 @@ int main(int argc, char ** argv)
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
+
+// The rasterizer can hand out the winning triangle's exact plane, so a consumer
+// need not finite-difference the depth image to recover a normal the geometry
+// already had. Pinned here because the estimator's accuracy depends on it.
+TEST(CpuRenderer, EmitsExactPlanesForATiltedQuad)
+{
+  CameraModel cam;
+  cam.width = 64; cam.height = 64;
+  cam.fx = cam.fy = 64.f; cam.cx = 32.f; cam.cy = 32.f;
+  cam.near = 0.01f; cam.far = 10.f;
+
+  // A quad tilted about the y axis, so depth varies across it and the plane is
+  // neither fronto-parallel nor degenerate.
+  const float tilt = 0.6f;  // rad
+  Mesh m;
+  m.vertices = {{-0.3f, -0.3f, 0.f}, {0.3f, -0.3f, 0.f}, {0.3f, 0.3f, 0.f}, {-0.3f, 0.3f, 0.f}};
+  m.indices = {0, 1, 2, 0, 2, 3};
+
+  RenderItem it;
+  it.mesh = &m;
+  it.T_cam_link = Eigen::Isometry3f::Identity();
+  it.T_cam_link.linear() =
+    Eigen::AngleAxisf(tilt, Eigen::Vector3f::UnitY()).toRotationMatrix();
+  it.T_cam_link.translation() = Eigen::Vector3f(0.f, 0.f, 1.f);
+
+  auto r = make_cpu_renderer();
+  std::vector<float> depth, planes;
+  ASSERT_TRUE(r->render_planes(cam, {it}, depth, planes));
+  ASSERT_EQ(planes.size(), depth.size() * 4);
+
+  // Analytic plane: the quad's +z normal rotated by the tilt, facing the camera.
+  const Eigen::Vector3f n_true =
+    -(it.T_cam_link.linear() * Eigen::Vector3f::UnitZ()).normalized();
+  const float d_true = n_true.dot(it.T_cam_link.translation());
+
+  int checked = 0;
+  double worst_n = 0.0, worst_z = 0.0;
+  for (int y = 0; y < cam.height; ++y) {
+    for (int x = 0; x < cam.width; ++x) {
+      const size_t i = static_cast<size_t>(y) * cam.width + x;
+      if (depth[i] <= 0.f) continue;
+      const Eigen::Vector3f n(planes[i * 4], planes[i * 4 + 1], planes[i * 4 + 2]);
+      worst_n = std::max<double>(worst_n, (n - n_true).norm());
+      worst_z = std::max<double>(worst_z, std::fabs(planes[i * 4 + 3] - d_true));
+      ++checked;
+    }
+  }
+  ASSERT_GT(checked, 500) << "quad should cover a good part of the image";
+  EXPECT_LT(worst_n, 1e-5) << "plane normal must be exact, not estimated";
+  EXPECT_LT(worst_z, 1e-5) << "plane offset must be exact";
+
+  // The ray-plane intersection is exact where the interpolated buffer is not:
+  // linear-in-screen z overestimates true depth on a slanted surface.
+  double max_gap = 0.0;
+  for (int y = 0; y < cam.height; ++y) {
+    for (int x = 0; x < cam.width; ++x) {
+      const size_t i = static_cast<size_t>(y) * cam.width + x;
+      if (depth[i] <= 0.f) continue;
+      const Eigen::Vector3f v(
+        (x + 0.5f - cam.cx) / cam.fx, (y + 0.5f - cam.cy) / cam.fy, 1.f);
+      const float z_exact = planes[i * 4 + 3] / n_true.dot(v);
+      max_gap = std::max<double>(max_gap, depth[i] - z_exact);
+    }
+  }
+  EXPECT_GT(max_gap, 1e-4) << "interpolated depth should measurably exceed the exact plane";
+}

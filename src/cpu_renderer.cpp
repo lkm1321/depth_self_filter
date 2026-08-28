@@ -23,10 +23,33 @@ public:
     const std::vector<RenderItem> & items,
     std::vector<float> & depth_out) override
   {
+    return render_impl(cam, items, depth_out, nullptr);
+  }
+
+  // Same rasterization, additionally recording the winning triangle's plane.
+  bool render_planes(
+    const CameraModel & cam,
+    const std::vector<RenderItem> & items,
+    std::vector<float> & depth_out,
+    std::vector<float> & plane_out) override
+  {
+    return render_impl(cam, items, depth_out, &plane_out);
+  }
+
+  const char * name() const override { return "cpu"; }
+
+private:
+  bool render_impl(
+    const CameraModel & cam,
+    const std::vector<RenderItem> & items,
+    std::vector<float> & depth_out,
+    std::vector<float> * plane_out)
+  {
     const int w = cam.width, h = cam.height;
     if (w <= 0 || h <= 0) return false;
-    depth_out.assign(static_cast<size_t>(w) * h,
-      std::numeric_limits<float>::infinity());
+    const size_t n = static_cast<size_t>(w) * h;
+    depth_out.assign(n, std::numeric_limits<float>::infinity());
+    if (plane_out) plane_out->assign(n * 4, 0.f);
 
     for (const auto & item : items) {
       if (!item.mesh) continue;
@@ -36,18 +59,21 @@ public:
         const Eigen::Vector3f p0 = T * m.vertices[m.indices[t + 0]];
         const Eigen::Vector3f p1 = T * m.vertices[m.indices[t + 1]];
         const Eigen::Vector3f p2 = T * m.vertices[m.indices[t + 2]];
-        raster_triangle(cam, p0, p1, p2, w, h, depth_out);
+        raster_triangle(cam, p0, p1, p2, w, h, depth_out, plane_out);
       }
     }
 
     // Convert "infinity" sentinel to 0 (invalid) for the caller's convention.
-    for (float & d : depth_out) {
-      if (!std::isfinite(d) || d > cam.far) d = 0.f;
+    for (size_t i = 0; i < n; ++i) {
+      if (!std::isfinite(depth_out[i]) || depth_out[i] > cam.far) {
+        depth_out[i] = 0.f;
+        if (plane_out) {
+          for (int k = 0; k < 4; ++k) (*plane_out)[i * 4 + k] = 0.f;
+        }
+      }
     }
     return true;
   }
-
-  const char * name() const override { return "cpu"; }
 
 private:
   // Project a camera-frame point to pixel coords; returns false if behind near.
@@ -65,7 +91,8 @@ private:
   static void raster_triangle(
     const CameraModel & cam,
     const Eigen::Vector3f & a, const Eigen::Vector3f & b,
-    const Eigen::Vector3f & c, int w, int h, std::vector<float> & depth)
+    const Eigen::Vector3f & c, int w, int h, std::vector<float> & depth,
+    std::vector<float> * plane_out)
   {
     // v1: skip triangles crossing the near plane rather than clipping them.
     // A small margin of missed silhouette pixels is absorbed by the node's
@@ -92,6 +119,15 @@ private:
     if (std::fabs(area) < 1e-6f) return;
     const float inv_area = 1.0f / area;
 
+    // Exact plane of this triangle in the camera frame, oriented towards the
+    // camera (+z forward, so a visible surface has n . X < 0).
+    Eigen::Vector3f nrm = (b - a).cross(c - a);
+    const float nlen = nrm.norm();
+    if (plane_out && nlen < 1e-12f) return;
+    if (nlen > 0.f) nrm /= nlen;
+    if (nrm.dot(a) > 0.f) nrm = -nrm;
+    const float plane_d = nrm.dot(a);
+
     for (int y = miny; y <= maxy; ++y) {
       const float py = y + 0.5f;
       for (int x = minx; x <= maxx; ++x) {
@@ -107,8 +143,17 @@ private:
         // approximation vs perspective-correct 1/z; adequate at pixel scale.
         const float z = w0 * za + w1 * zb + w2 * zc;
         if (z <= cam.near) continue;
-        float & dst = depth[static_cast<size_t>(y) * w + x];
-        if (z < dst) dst = z;
+        const size_t idx = static_cast<size_t>(y) * w + x;
+        float & dst = depth[idx];
+        if (z < dst) {
+          dst = z;
+          if (plane_out) {
+            (*plane_out)[idx * 4 + 0] = nrm.x();
+            (*plane_out)[idx * 4 + 1] = nrm.y();
+            (*plane_out)[idx * 4 + 2] = nrm.z();
+            (*plane_out)[idx * 4 + 3] = plane_d;
+          }
+        }
       }
     }
   }

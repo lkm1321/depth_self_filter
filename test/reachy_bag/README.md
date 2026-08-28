@@ -119,3 +119,81 @@ With the mesh fix and the Luxonis nominal intrinsics the filter cleanly masks th
 whole arm + gripper (**85% depth-aligned, 1.4 cm median error**). A ~5 px vertical
 residual remains (per-unit factory calibration `cy`, or the ToF-to-head extrinsic).
 Debug/override levers: `override_fx/fy/cx/cy`, `focal_scale`, `publish_debug`.
+
+## Extrinsic self-calibration on this bag
+
+First real-data run of the estimator in [CALIBRATION.md](../../CALIBRATION.md),
+via `depth_self_calib_replay` against the same ToF stream, natively on an RTX 4090
+(backend `egl`, **exact planes**), 29 links / 18244 triangles, `fx=fy=457`,
+`cx=320, cy=240`.
+
+```bash
+ros2 run depth_self_filter depth_self_calib_replay --ros-args \
+  -p robot_description_file:=$SP/reachy_clean.urdf \
+  -p override_fx:=457.0 -p override_fy:=457.0 -p override_cx:=320.0 -p override_cy:=240.0 \
+  -p tf_timeout_s:=0.02 -p noise_a:=0.010 -p noise_b:=0.010 -p jump_sigma:=2.5 \
+  -r image:=/teleop_camera/depth/image_raw -r camera_info:=/teleop_camera/depth/camera_info
+# then: ros2 bag play my_bag --qos-profile-overrides-path qos.yaml
+```
+
+Of 1523 depth frames: ~990 have no robot in the ToF FoV at all, ~490 are used.
+
+### Result: the fit improves, the pose is not trustworthy
+
+| | median depth error (p50 of per-frame medians) |
+|---|---|
+| frozen at nominal (prior pinned) | **14.78 mm** |
+| free estimation | **8.92 mm** |
+
+14.78 mm at nominal independently reproduces the +1.4 cm recorded above, which
+cross-validates the whole replay path (mesh load, TF, intrinsics, EGL render).
+Free estimation improves the fit by ~40 %.
+
+But the resulting correction is `y = +75 mm, roll = +7.9°` — implausible for a
+camera mount, and far outside the 20 mm / 2° prior. The eigen-decomposition of the
+covariance says why:
+
+```
+observability (eigenvectors of the covariance, worst first):
+  sigma 0.0035 along +0.41*y -0.17*z +0.89*roll
+  sigma 0.0011 along -0.22*x +0.74*pitch +0.63*yaw
+  corr(y,roll)=+0.9922  corr(x,pitch)=-0.8410
+```
+
+**`t_y` and `ω_x` are 99.2 % correlated.** For a target that is compact and stays
+at roughly one place in the FoV — this arm and gripper — a rotation about x and a
+translation in y are nearly indistinguishable, so the estimator slides along a
+valley: both components large, their *combination* tightly determined. The
+per-DoF sigma of 1.44 mm on `y` is not wrong, it is the conditional uncertainty; a
+diagonal cannot express a 0.99-correlated pair.
+
+Lesson for the design: `prior_dominance` alone is **not** a sufficient honesty
+signal. It reads 0.072 for `y` here — apparently well observed — while the pair is
+barely observed at all. The eigenstructure has to be reported, and any consumer of
+`T_fix` must check it before trusting the number.
+
+### Bugs this run found
+
+- **Block-displaced frames scored as inliers.** The robust scale is a MAD *about
+  the median*, so a frame displaced as a block (TF glitch) has a small spread
+  despite a ~1 m offset: the scale inflated to 13.5, the Tukey window widened to
+  ±1.4 m, and ~60 % of a garbage frame's samples counted as inliers. Fixed with
+  `max_frame_normalised_residual` (Tukey guards spread; that gate guards offset).
+  Worst per-frame error fell 2337 mm → 55.9 mm, mean 29.8 mm → 10.4 mm. Pinned by
+  `Observer.RejectsBlockDisplacedFrames`.
+- **`to_xyz_rpy` emitted (pi, pi, pi) for identity.** Eigen's `eulerAngles(2,1,0)`
+  picks that branch near identity — the same rotation, but nonsense written into a
+  params file. Replaced with a direct atan2 extraction.
+- **The ToF noise model was ~2x optimistic.** Measured robust scale 2.05 at the
+  documented `sigma(z) = 5mm + 5mm z^2`; at `10mm + 10mm z^2` it settles to 1.17.
+  With the wrong model, `median |r|/sigma` sat at 1.18 against a 1.5 jump
+  threshold and step detection fired 109 times, continuously discarding evidence —
+  exactly the failure mode `jump_resets()` was exposed to catch.
+
+### Not yet resolved
+
+The `y`/`roll` valley needs either geometric diversity the passive stream does not
+contain, or the intrinsics guard from milestone 4 — a residual `cy` error would be
+absorbed into exactly this pair, and the README above already suspects "per-unit
+factory calibration `cy`, or the ToF-to-head extrinsic". Do not apply this
+`T_fix`.

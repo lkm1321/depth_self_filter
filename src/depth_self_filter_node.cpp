@@ -137,10 +137,19 @@ DepthSelfFilterNode::DepthSelfFilterNode(const rclcpp::NodeOptions & options)
     load_meshes(urdf_param);
   }
   // Also listen for a latched robot_description (robot_state_publisher).
+  // This must be transient_local (to catch the latched URDF), which is
+  // incompatible with intra-process comms. When this node runs in a composable
+  // container with IPC enabled (see depth_self_filter_composable.launch.py),
+  // enabling IPC on every endpoint would throw here, so we explicitly opt this
+  // one config subscription out of IPC. The depth-image path — the one we want
+  // zero-copy — keeps the node's IPC setting.
   auto qos = rclcpp::QoS(1).transient_local();
+  rclcpp::SubscriptionOptions urdf_opts;
+  urdf_opts.use_intra_process_comm = rclcpp::IntraProcessSetting::Disable;
   urdf_sub_ = create_subscription<std_msgs::msg::String>(
     "robot_description", qos,
-    std::bind(&DepthSelfFilterNode::on_robot_description, this, std::placeholders::_1));
+    std::bind(&DepthSelfFilterNode::on_robot_description, this, std::placeholders::_1),
+    urdf_opts);
 
   publish_debug_ = declare_parameter("publish_debug", false);
   declare_parameter("focal_scale", 1.0);   // debug: multiply camera_info fx,fy

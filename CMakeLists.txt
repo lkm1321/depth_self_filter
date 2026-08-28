@@ -50,6 +50,7 @@ add_library(${PROJECT_NAME}_component SHARED
   src/urdf_meshes.cpp
   src/cpu_renderer.cpp
   src/visibility.cpp
+  src/calibration.cpp
   ${DSF_EGL_SOURCES})
 
 target_include_directories(${PROJECT_NAME}_component PUBLIC
@@ -71,6 +72,11 @@ add_executable(depth_self_filter_main src/main.cpp)
 target_link_libraries(depth_self_filter_main ${PROJECT_NAME}_component)
 ament_target_dependencies(depth_self_filter_main rclcpp)
 
+# Self-calibration replay: drives the observer from a live graph or a bag.
+add_executable(depth_self_calib_replay src/calib_replay.cpp)
+target_link_libraries(depth_self_calib_replay ${PROJECT_NAME}_component)
+ament_target_dependencies(depth_self_calib_replay ${dependencies})
+
 # GPU/EGL smoke probe (no ROS runtime needed).
 add_executable(render_probe src/render_probe.cpp)
 target_link_libraries(render_probe ${PROJECT_NAME}_component Eigen3::Eigen)
@@ -87,7 +93,8 @@ install(TARGETS ${PROJECT_NAME}_component
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
-install(TARGETS depth_self_filter_main render_probe DESTINATION lib/${PROJECT_NAME})
+install(TARGETS depth_self_filter_main render_probe depth_self_calib_replay
+  DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
 
@@ -104,6 +111,13 @@ if(BUILD_TESTING)
     src/visibility.cpp)
   target_include_directories(test_visibility PRIVATE include)
   target_link_libraries(test_visibility Eigen3::Eigen)
+
+  # Self-calibration estimator. Links only the ROS-free sources on purpose: the
+  # recovery/starvation tests must run in CI with no GPU, no bag and no ROS graph.
+  ament_add_gtest(test_calibration test/test_calibration.cpp
+    src/calibration.cpp src/cpu_renderer.cpp src/visibility.cpp)
+  target_include_directories(test_calibration PRIVATE include)
+  target_link_libraries(test_calibration Eigen3::Eigen)
 endif()
 
 ament_export_include_directories(include)
