@@ -16,6 +16,8 @@ find_package(rclcpp_components REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(sphere_scene_interfaces REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_eigen REQUIRED)
@@ -41,7 +43,7 @@ else()
 endif()
 
 set(dependencies
-  rclcpp rclcpp_components sensor_msgs std_msgs geometry_msgs
+  rclcpp rclcpp_components sensor_msgs std_msgs geometry_msgs sphere_scene_interfaces std_srvs
   tf2 tf2_ros tf2_eigen image_transport message_filters cv_bridge
   urdf resource_retriever)
 
@@ -104,6 +106,10 @@ if(BUILD_TESTING)
     src/visibility.cpp)
   target_include_directories(test_visibility PRIVATE include)
   target_link_libraries(test_visibility Eigen3::Eigen)
+
+  ament_add_gtest(test_sphere_mask test/test_sphere_mask.cpp)
+  target_include_directories(test_sphere_mask PRIVATE include)
+  target_link_libraries(test_sphere_mask Eigen3::Eigen)
 endif()
 
 ament_export_include_directories(include)

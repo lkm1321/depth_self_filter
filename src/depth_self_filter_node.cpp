@@ -1,4 +1,5 @@
 #include "depth_self_filter/depth_self_filter_node.hpp"
+#include "depth_self_filter/sphere_mask.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -102,6 +103,7 @@ DepthSelfFilterNode::DepthSelfFilterNode(const rclcpp::NodeOptions & options)
 : rclcpp::Node("depth_self_filter", options)
 {
   use_collision_ = declare_parameter("use_collision_meshes", true);
+  require_complete_robot_tf_ = declare_parameter("require_complete_robot_tf", false);
   depth_margin_m_ = declare_parameter("depth_margin_m", 0.02);
   robot_dilation_px_ = declare_parameter("robot_dilation_px", 2);
   mask_dilation_px_ = declare_parameter("mask_dilation_px", 4);
@@ -133,6 +135,25 @@ DepthSelfFilterNode::DepthSelfFilterNode(const rclcpp::NodeOptions & options)
   tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
+  sphere_padding_=declare_parameter("sphere_padding_m",0.005);
+  if (!std::isfinite(sphere_padding_) || sphere_padding_<0)
+    throw std::invalid_argument("sphere_padding_m must be finite and nonnegative");
+  filtering_enabled_=declare_parameter("filtering_enabled",true);
+  // Default mutually-exclusive callback group serializes services and frames.
+  sphere_service_=create_service<sphere_scene_interfaces::srv::SetSphereSet>(
+    "~/set_sphere_set", [this](
+      const std::shared_ptr<sphere_scene_interfaces::srv::SetSphereSet::Request> request,
+      std::shared_ptr<sphere_scene_interfaces::srv::SetSphereSet::Response> response) {
+      *response=sphere_sets_.apply(*request);
+    });
+  enabled_service_=create_service<std_srvs::srv::SetBool>(
+    "~/set_enabled", [this](const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+                           std::shared_ptr<std_srvs::srv::SetBool::Response> response) {
+      filtering_enabled_=request->data;
+      response->success=true;
+      response->message=filtering_enabled_?"publishing enabled":"frames withheld";
+    });
+
   if (!urdf_param.empty()) {
     load_meshes(urdf_param);
   }
@@ -151,6 +172,7 @@ DepthSelfFilterNode::DepthSelfFilterNode(const rclcpp::NodeOptions & options)
   pub_ = create_publisher<ImageMsg>("image_filtered", rclcpp::SensorDataQoS());
   if (publish_debug_) {
     robot_depth_pub_ = create_publisher<ImageMsg>("robot_depth", rclcpp::SensorDataQoS());
+    sphere_mask_pub_=create_publisher<ImageMsg>("~/sphere_mask",rclcpp::SensorDataQoS());
   }
 
   depth_sub_.subscribe(this, "image", rclcpp::SensorDataQoS().get_rmw_qos_profile());
@@ -221,12 +243,18 @@ bool DepthSelfFilterNode::build_items(
       culled, links_.size(), items.size());
   }
   // If we couldn't place most links, the render would be wrong — skip the frame.
+  if (require_complete_robot_tf_ && failures) {
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+      "withholding depth: %zu robot link transforms unavailable", failures);
+    return false;
+  }
   return !links_.empty() && failures <= links_.size() / 2;
 }
 
 void DepthSelfFilterNode::on_frame(
   const ImageMsg::ConstSharedPtr & depth, const CamInfoMsg::ConstSharedPtr & info)
 {
+  if (!filtering_enabled_) return;
   std::vector<float> meas;
   if (!to_metres(*depth, meas)) {
     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
@@ -254,11 +282,50 @@ void DepthSelfFilterNode::on_frame(
   cam.near = near_;
   cam.far = far_;
 
+  if (!(cam.fx>0 && cam.fy>0) || !std::isfinite(cam.fx) || !std::isfinite(cam.fy) ||
+      !std::isfinite(cam.cx) || !std::isfinite(cam.cy)) return;
+  const auto before_spheres=publish_debug_?meas:std::vector<float>{};
+  for (const auto & entry:sphere_sets_.entries()) {
+    if (entry.second.remove) continue;
+    const auto & set=entry.second.set;
+    Eigen::Isometry3d camera_from_parent;
+    try {
+      camera_from_parent=tf2::transformToEigen(tf_buffer_->lookupTransform(
+        depth->header.frame_id,set.parent_frame,
+        rclcpp::Time(depth->header.stamp)+rclcpp::Duration::from_seconds(time_offset_s_),
+        tf2::durationFromSec(tf_timeout_s_)));
+    } catch (const tf2::TransformException & e) {
+      RCLCPP_WARN_THROTTLE(get_logger(),*get_clock(),5000,
+        "withholding depth: sphere set '%s' TF unavailable: %s",set.id.c_str(),e.what());
+      return;
+    }
+    const auto & p=set.pose.position; const auto & q=set.pose.orientation;
+    Eigen::Isometry3d parent_from_set=Eigen::Isometry3d::Identity();
+    parent_from_set.linear()=Eigen::Quaterniond(q.w,q.x,q.y,q.z).normalized().toRotationMatrix();
+    parent_from_set.translation()=Eigen::Vector3d(p.x,p.y,p.z);
+    const auto camera_from_set=camera_from_parent*parent_from_set;
+    for (const auto & sphere:set.spheres) {
+      const Eigen::Vector3d point=camera_from_set*Eigen::Vector3d(
+        sphere.center.x,sphere.center.y,sphere.center.z);
+      mask_sphere(cam,point.cast<float>(),float(sphere.radius+sphere_padding_),meas);
+    }
+  }
+  if (sphere_mask_pub_) {
+    auto mask=std::make_unique<ImageMsg>();
+    mask->header=depth->header; mask->height=depth->height; mask->width=depth->width;
+    mask->encoding="mono8"; mask->step=depth->width; mask->data.resize(meas.size());
+    for (size_t i=0;i<meas.size();++i)
+      mask->data[i]=std::isfinite(before_spheres[i])&&!std::isfinite(meas[i])?255:0;
+    sphere_mask_pub_->publish(std::move(mask));
+  }
+
   // Pass-through if we have no geometry or no TF yet.
   std::vector<RenderItem> items;
   const bool have_robot =
     !links_.empty() &&
     build_items(cam, depth->header.frame_id, rclcpp::Time(depth->header.stamp), items);
+
+  if (require_complete_robot_tf_ && !have_robot) return;
 
   if (have_robot) {
     if (renderer_->render(cam, items, robot_depth_)) {
@@ -295,6 +362,7 @@ void DepthSelfFilterNode::on_frame(
       }
     } else {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "render failed");
+      if (require_complete_robot_tf_) return;
     }
   }
 

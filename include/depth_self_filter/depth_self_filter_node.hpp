@@ -13,6 +13,8 @@
 #include <std_msgs/msg/string.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
+#include <sphere_scene_interfaces/registry.hpp>
+#include <std_srvs/srv/set_bool.hpp>
 
 #include "depth_self_filter/renderer.hpp"
 #include "depth_self_filter/urdf_meshes.hpp"
@@ -50,6 +52,7 @@ private:
 
   // Parameters
   bool use_collision_{true};
+  bool require_complete_robot_tf_{false};
   double depth_margin_m_{0.02};
   int robot_dilation_px_{2};   // grow rendered robot depth (absorbs silhouette error)
   int mask_dilation_px_{4};
@@ -74,6 +77,12 @@ private:
   rclcpp::Publisher<ImageMsg>::SharedPtr pub_;
   rclcpp::Publisher<ImageMsg>::SharedPtr robot_depth_pub_;  // debug: rendered robot depth
   bool publish_debug_{false};
+  sphere_scene_interfaces::Registry sphere_sets_;
+  rclcpp::Service<sphere_scene_interfaces::srv::SetSphereSet>::SharedPtr sphere_service_;
+  rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr enabled_service_;
+  rclcpp::Publisher<ImageMsg>::SharedPtr sphere_mask_pub_;
+  bool filtering_enabled_{true};
+  double sphere_padding_{0.005};
 };
 
 }  // namespace depth_self_filter

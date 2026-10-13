@@ -42,6 +42,43 @@ Key params (see [config/params.yaml](config/params.yaml)): `use_collision_meshes
 `frustum_cull` (skip links whose bounding box is off-screen; default `true`),
 intrinsics `override_fx/fy/cx/cy`, debug `focal_scale`/`publish_debug`.
 
+## Managed sphere geometry
+
+`~/set_sphere_set` (`sphere_scene_interfaces/srv/SetSphereSet`) adds, atomically
+replaces, or removes a sphere cover. Supply an opaque ID, a positive revision,
+a parent TF frame, a unit-quaternion pose in that frame, and local sphere
+centres/radii in metres. An identical retry succeeds; older or conflicting
+revisions fail. Removal retains a revision tombstone.
+
+The filter resolves each parent at the depth image timestamp (including the
+configured time offset). It masks measured 3D points inside the sphere cover,
+inflated by `sphere_padding_m` (default 0.005 m). Foreground and background
+points outside the cover are retained. Missing TF for any registered set
+withholds the frame. This applies to world and attached sets alike; the filter
+does not interpret planning modes or allowed-contact links.
+
+Set `filtering_enabled: false` at startup when a manager must install geometry
+before mapping begins. `~/set_enabled` (`std_srvs/srv/SetBool`) opens/closes this
+publication gate. With debug publishing enabled, `~/sphere_mask` is a `mono8`
+image identifying the measurements removed by registered sphere sets.
+
+For mapping, `require_complete_robot_tf: true` additionally withholds frames
+unless every loaded robot link has a timestamped transform and rendering
+succeeds. It also withholds frames before robot geometry is loaded. The default
+is false to preserve existing pass-through behavior; managed-object TF is
+always required regardless of this setting.
+
+Build the `sphere_scene_interfaces` package in the same workspace first. In the
+Reachy integration repository its canonical source is
+`sbc_planner_cpp/sphere_scene_interfaces`; the root
+`docker/Dockerfile.self_filter` builds both packages from source. The standalone
+Dockerfile requires this dependency to be supplied in its build environment.
+
+Tests: `test_sphere_mask` exercises depth-aware masking, and
+`test/test_sphere_service.py` starts a private filter and checks service retries,
+invalid inputs, TF withholding/recovery, startup gating and removal. Run the
+Python integration test on an unused ROS domain after sourcing both packages.
+
 ### Absorbing calibration error at the silhouette
 Two knobs grow the removed region to tolerate TF/intrinsic/latency error:
 - **`robot_dilation_px`** — grayscale min-dilation of the *rendered robot depth*:
